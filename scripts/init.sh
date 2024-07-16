@@ -55,6 +55,8 @@ wait_for_client() {
         retval=$?
         # Only break if socat returns a "0" -> client connection and no error
         [ "$retval" -eq "0" ] && break
+        # Sleep one second to prevent spam in case the server is still shutting down
+        sleep 1
     done
 }
 
