@@ -2,6 +2,8 @@
 # shellcheck source=scripts/helper_functions.sh
 source "/home/steam/server/helper_functions.sh"
 
+SERVER_RUNNING=true
+
 if [[ "$(id -u)" -eq 0 ]] && [[ "$(id -g)" -eq 0 ]]; then
     if [[ "${PUID}" -ne 0 ]] && [[ "${PGID}" -ne 0 ]]; then
         LogAction "EXECUTING USERMOD"
@@ -28,24 +30,60 @@ mkdir -p /palworld/backups
 term_handler() {
   DiscordMessage "Shutdown" "${DISCORD_PRE_SHUTDOWN_MESSAGE}" "in-progress" "${DISCORD_PRE_SHUTDOWN_MESSAGE_ENABLED}" "${DISCORD_PRE_SHUTDOWN_MESSAGE_URL}"
 
+  SERVER_RUNNING=false
+
     if ! shutdown_server; then
         # Does not save
         kill -SIGTERM "$(pidof PalServer-Linux-Shipping)"
     fi
 
-    tail --pid="$killpid" -f 2>/dev/null
+    tail --pid="$serverpid" -f 2>/dev/null
+}
+
+start_server() {
+    if [[ "$(id -u)" -eq 0 ]]; then
+        su steam -c ./start.sh &
+    else
+        ./start.sh &
+    fi
+}
+
+wait_for_client() {
+    # Wait for a client to connect
+    while [ $SERVER_RUNNING ] ; do
+        socat -U UDP4-LISTEN:8211 SYSTEM:""
+        retval=$?
+        # Only break if socat returns a "0" -> client connection and no error
+        [ "$retval" -eq "0" ] && break
+    done
 }
 
 trap 'term_handler' SIGTERM
 
-if [[ "$(id -u)" -eq 0 ]]; then
-    su steam -c ./start.sh &
-else
-    ./start.sh &
-fi
-# Process ID of su
-killpid="$!"
-wait "$killpid"
+
+# One loop per server restart
+while [ $SERVER_RUNNING ]; do
+    start_server
+    serverpid="$!"
+    last_player_time=$(date +%s)
+
+    # Main loop checking for the player count
+    while [ $SERVER_RUNNING ] ; do
+        if [ "$(get_player_count)" -gt "0" ]; then
+            last_player_time=$(date +%s)
+            #echo "Last player time updated"
+        fi
+        t=$(($(date +%s) - last_player_time ))
+        #echo "Time since the last player was online: $t"
+        [ "$t" -gt "3600" ] && break
+        sleep 10
+    done
+    # No players online and waited more than the threshold
+    shutdown_server
+    wait_for_client
+done
+
+wait "$serverpid"
 
 mapfile -t backup_pids < <(pgrep backup)
 if [ "${#backup_pids[@]}" -ne 0 ]; then
